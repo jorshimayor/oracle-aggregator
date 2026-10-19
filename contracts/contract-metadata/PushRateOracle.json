@@ -1,0 +1,20 @@
+{
+  "contractAddress": "0xe3d81cadae52ba4c3a56b2cbd180bd33ec16d154",
+  "network": "ARC-TESTNET",
+  "deployerWalletId": "32becdc1-246f-53ef-bdfa-085062996b19",
+  "deployerAddress": "0xbbb577c598960744009a5f57de2ba3eef1646317",
+  "contract_code_path": "/home/user/app/contracts/PushRateOracle.sol",
+  "contract_compiled_code_path": "/home/user/app/contracts/out/PushRateOracle.sol/PushRateOracle.json",
+  "contract_network_and_links": {
+    "Arc Testnet": "https://explorer.testnet.arc.io/address/0xe3d81cadae52ba4c3a56b2cbd180bd33ec16d154"
+  },
+  "contract_deployments": [
+    {
+      "chain": "Arc Testnet",
+      "address": "0xe3d81cadae52ba4c3a56b2cbd180bd33ec16d154",
+      "explorerUrl": "https://explorer.testnet.arc.io/address/0xe3d81cadae52ba4c3a56b2cbd180bd33ec16d154",
+      "txHash": "0xd6a477371c79a5a64a2000518e7ea82c5e5f9b8c852469ac2c3438af091f19b4",
+      "deployedAt": "2026-10-16T10:12:20.666Z"
+    }
+  ]
+}

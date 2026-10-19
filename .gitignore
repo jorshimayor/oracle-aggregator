@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# build outputs
+dist/
+contracts/out/
+contracts/cache/
+
+# env files — never commit secrets
+.env
+.env.*
+!.env.example
+
+# Circle secrets & recovery
+.circle/
+*recovery*
+*recovery_file*
+
+# misc
+.DS_Store
+*.local
