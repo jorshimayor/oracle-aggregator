@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useId } from 'react'
 import {
   useAccount, useReadContract, useWriteContract,
   useWaitForTransactionReceipt, useSwitchChain,
@@ -183,6 +183,75 @@ async function browserAggregatePair(pair: string, network: Network): Promise<Agg
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 type Tab = 'prices' | 'vault' | 'lock' | 'settle'
+
+// ── Tooltip ───────────────────────────────────────────────────────────────────
+// Accessible: shows on hover (desktop) and tap/focus (mobile). Positioned above
+// the trigger. Keyboard-friendly: visible on focus, dismissed on Escape.
+function Tooltip({ content, children }: { content: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false)
+  const id = useId()
+  const ref = useRef<HTMLSpanElement>(null)
+
+  // Close on Escape or outside click
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    const onOutside = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', onOutside)
+    return () => { document.removeEventListener('keydown', onKey); document.removeEventListener('mousedown', onOutside) }
+  }, [open])
+
+  return (
+    <span
+      ref={ref}
+      className="relative inline-flex items-center"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      onFocus={() => setOpen(true)}
+      onBlur={() => setOpen(false)}
+      onClick={() => setOpen(v => !v)}
+    >
+      {children}
+      <span
+        role="tooltip"
+        id={id}
+        aria-hidden={!open}
+        className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 w-52 -translate-x-1/2 rounded-xl px-3 py-2 text-xs leading-relaxed text-center transition-all duration-150"
+        style={{
+          background: 'rgba(15,23,42,0.97)',
+          border: '1px solid rgba(172,198,233,0.18)',
+          color: '#cbd5e1',
+          boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
+          opacity: open ? 1 : 0,
+          transform: `translateX(-50%) translateY(${open ? '0px' : '4px'})`,
+          backdropFilter: 'blur(12px)',
+          whiteSpace: 'normal',
+        }}
+      >
+        {content}
+        {/* Arrow */}
+        <span
+          className="absolute left-1/2 top-full -translate-x-1/2 block"
+          style={{
+            width: 0, height: 0,
+            borderLeft: '6px solid transparent',
+            borderRight: '6px solid transparent',
+            borderTop: '6px solid rgba(15,23,42,0.97)',
+          }}
+        />
+      </span>
+    </span>
+  )
+}
+
+// ── Tab descriptions (shown as tooltips on the tab bar) ───────────────────────
+const TAB_TIPS: Record<Tab, string> = {
+  prices: 'Live FX and crypto rates aggregated from 7 oracle sources — DIA, Chainlink, Pyth, ExchangeRate-API, and more. Refreshes every 30s.',
+  vault:  'Deposit USDC into the liquidity pool to earn premiums from rate-lock takers. Withdraw your share anytime. Your share grows as locks settle in your favour.',
+  lock:   'Lock in today\'s USD/NGN exchange rate for up to 30 days. Pay a small premium and receive the difference if the rate moves against you at settlement.',
+  settle: 'After a lock expires, settle it to receive your payout. The contract compares the locked rate to the current on-chain oracle rate and pays the difference.',
+}
 
 // ════════════════════════════════════════════════════════════════════════════════
 // NetworkToggle
@@ -845,10 +914,10 @@ function WsStatus({ apiBase }: { apiBase: string }) {
 // App root
 // ════════════════════════════════════════════════════════════════════════════════
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
-  { id: 'prices', label: 'Prices', icon: <Activity size={16} /> },
-  { id: 'vault', label: 'Fund Pool', icon: <BarChart3 size={16} /> },
-  { id: 'lock', label: 'Open Lock', icon: <Lock size={16} /> },
-  { id: 'settle', label: 'Settle', icon: <TrendingUp size={16} /> },
+  { id: 'prices', label: 'Prices',    icon: <Activity size={16} /> },
+  { id: 'vault',  label: 'Fund Pool', icon: <BarChart3 size={16} /> },
+  { id: 'lock',   label: 'Open Lock', icon: <Lock size={16} /> },
+  { id: 'settle', label: 'Settle',    icon: <TrendingUp size={16} /> },
 ]
 
 export default function App() {
@@ -876,11 +945,27 @@ export default function App() {
 
           <div className="flex gap-1 p-1 rounded-2xl mb-4" style={{ background: 'var(--surface-muted)' }}>
             {TABS.map(t => (
-              <button key={t.id} onClick={() => setTab(t.id)}
-                className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-semibold transition"
-                style={{ background: tab === t.id ? 'var(--surface-strong)' : 'transparent', color: tab === t.id ? 'var(--ink)' : 'var(--subtle)', boxShadow: tab === t.id ? '0 1px 4px rgba(0,0,0,0.25)' : 'none' }}>
-                {t.icon}{t.label}
-              </button>
+              <Tooltip key={t.id} content={TAB_TIPS[t.id]}>
+                <button
+                  onClick={() => setTab(t.id)}
+                  aria-label={`${t.label} — ${TAB_TIPS[t.id]}`}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                  style={{
+                    background: tab === t.id ? 'var(--surface-strong)' : 'transparent',
+                    color: tab === t.id ? 'var(--ink)' : 'var(--subtle)',
+                    boxShadow: tab === t.id ? '0 1px 4px rgba(0,0,0,0.25)' : 'none',
+                    outlineColor: 'var(--accent)',
+                  }}
+                >
+                  {t.icon}
+                  {t.label}
+                  {/* Subtle info dot — signals there's a tooltip */}
+                  <span
+                    className="w-1 h-1 rounded-full flex-shrink-0 opacity-50"
+                    style={{ background: tab === t.id ? 'var(--accent)' : 'var(--subtle)' }}
+                  />
+                </button>
+              </Tooltip>
             ))}
           </div>
 
