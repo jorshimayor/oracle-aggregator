@@ -10,7 +10,7 @@ import type { Chain } from 'viem'
 import { toast } from 'sonner'
 import {
   ArrowRight, Lock, TrendingUp, BarChart3,
-  RefreshCw, Globe, Activity, ChevronDown, ExternalLink,
+  RefreshCw, Globe, Activity, ChevronDown, ExternalLink, HelpCircle,
 } from 'lucide-react'
 
 // ── Network ──────────────────────────────────────────────────────────────────
@@ -943,30 +943,73 @@ export default function App() {
         <div className="w-full max-w-lg">
           {isConnected && <WrongChainBanner network={network} />}
 
-          <div className="flex gap-1 p-1 rounded-2xl mb-4" style={{ background: 'var(--surface-muted)' }}>
-            {TABS.map(t => (
-              <Tooltip key={t.id} content={TAB_TIPS[t.id]}>
-                <button
-                  onClick={() => setTab(t.id)}
-                  aria-label={`${t.label} — ${TAB_TIPS[t.id]}`}
-                  className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
-                  style={{
-                    background: tab === t.id ? 'var(--surface-strong)' : 'transparent',
-                    color: tab === t.id ? 'var(--ink)' : 'var(--subtle)',
-                    boxShadow: tab === t.id ? '0 1px 4px rgba(0,0,0,0.25)' : 'none',
-                    outlineColor: 'var(--accent)',
-                  }}
-                >
-                  {t.icon}
-                  {t.label}
-                  {/* Subtle info dot — signals there's a tooltip */}
-                  <span
-                    className="w-1 h-1 rounded-full flex-shrink-0 opacity-50"
-                    style={{ background: tab === t.id ? 'var(--accent)' : 'var(--subtle)' }}
-                  />
-                </button>
-              </Tooltip>
-            ))}
+          {/* ── Tab bar ─────────────────────────────────────────────────── */}
+          <div
+            className="grid mb-4 rounded-2xl p-1.5 gap-1.5"
+            style={{
+              gridTemplateColumns: 'repeat(4, 1fr)',
+              background: 'var(--surface-muted)',
+            }}
+          >
+            {TABS.map(t => {
+              const active = tab === t.id
+              return (
+                <Tooltip key={t.id} content={TAB_TIPS[t.id]}>
+                  <button
+                    onClick={() => setTab(t.id)}
+                    aria-label={`${t.label} — ${TAB_TIPS[t.id]}`}
+                    className="relative flex flex-col items-center justify-center gap-1 rounded-xl transition-all focus-visible:outline-none"
+                    style={{
+                      minHeight: '62px',
+                      padding: '10px 6px 8px',
+                      background: active ? 'var(--surface-strong)' : 'transparent',
+                      color: active ? 'var(--ink)' : 'var(--subtle)',
+                      boxShadow: active
+                        ? '0 0 0 1px var(--border), 0 2px 8px rgba(0,0,0,0.35)'
+                        : 'none',
+                      outlineColor: 'var(--accent)',
+                    }}
+                  >
+                    {/* Active accent bar at top */}
+                    {active && (
+                      <span
+                        className="absolute top-0 left-1/2 -translate-x-1/2 rounded-full"
+                        style={{ width: '24px', height: '2px', background: 'var(--accent)' }}
+                      />
+                    )}
+
+                    {/* Icon */}
+                    <span
+                      className="flex items-center justify-center rounded-lg"
+                      style={{
+                        width: '32px',
+                        height: '32px',
+                        background: active ? 'rgba(172,198,233,0.15)' : 'transparent',
+                        color: active ? 'var(--accent)' : 'var(--subtle)',
+                        transition: 'background 0.15s, color 0.15s',
+                      }}
+                    >
+                      {t.icon}
+                    </span>
+
+                    {/* Label + info hint */}
+                    <span className="flex items-center gap-0.5">
+                      <span
+                        className="text-xs font-semibold leading-none"
+                        style={{ letterSpacing: '0.01em' }}
+                      >
+                        {t.label}
+                      </span>
+                      <HelpCircle
+                        size={9}
+                        className="flex-shrink-0 opacity-40"
+                        style={{ color: active ? 'var(--accent)' : 'var(--subtle)' }}
+                      />
+                    </span>
+                  </button>
+                </Tooltip>
+              )
+            })}
           </div>
 
           <div className="rounded-2xl p-5" style={{ background: 'var(--surface-strong)', border: '1px solid var(--border)', backdropFilter: 'blur(12px)' }}>
