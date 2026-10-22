@@ -1,0 +1,46 @@
+services:
+  - type: web
+    name: pesaarc-oracle
+    runtime: node
+    buildCommand: bun install --frozen-lockfile && bun run build
+    startCommand: bun run server/index.ts
+    plan: free
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001
+      # ── Copy these from your .env ─────────────────────────────────────────────
+      - key: RPC_PROXY_BASE_URL
+        sync: false
+      - key: RPC_PROXY_TOKEN
+        sync: false
+      - key: RPC_PROXY_CHAINS
+        sync: false
+      - key: ETH_MAINNET_RPC
+        value: https://ethereum.publicnode.com
+      - key: PYTH_API_KEY
+        sync: false
+      # ── Arc Testnet contract addresses ────────────────────────────────────────
+      - key: VITE_TESTNET_VAULT
+        value: "0x1b4e782b2d95bcaa14f4e8e9b59787878470b4a4"
+      - key: VITE_TESTNET_PUSH_ORACLE
+        value: "0xe3d81cadae52ba4c3a56b2cbd180bd33ec16d154"
+      - key: VITE_TESTNET_RATELOCK
+        value: "0x372d0965f14dcd66263ee10941af08473a7149c3"
+      # ── Arc Mainnet contract addresses (fill when deployed) ───────────────────
+      - key: VITE_MAINNET_VAULT
+        sync: false
+      - key: VITE_MAINNET_PUSH_ORACLE
+        sync: false
+      - key: VITE_MAINNET_RATELOCK
+        sync: false
+      # ── Chainlink feed addresses on Ethereum mainnet ──────────────────────────
+      - key: VITE_CHAINLINK_ETH_USD
+        value: "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"
+      - key: VITE_CHAINLINK_BTC_USD
+        value: "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c"
+      - key: VITE_CHAINLINK_LINK_USD
+        value: "0x2c1d072e956AFFC0D435Cb7AC38EF18d24d9127c"
+      - key: VITE_CHAINLINK_USDC_USD
+        value: "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6"

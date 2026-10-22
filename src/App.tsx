@@ -1,31 +1,63 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   useAccount, useReadContract, useWriteContract,
   useWaitForTransactionReceipt, useSwitchChain,
 } from 'wagmi'
 import { ConnectKitButton } from 'connectkit'
 import { erc20Abi, parseUnits, formatUnits } from 'viem'
+import { arcTestnet, arc } from 'viem/chains'
+import type { Chain } from 'viem'
 import { toast } from 'sonner'
-import { ArrowRight, Lock, TrendingUp, BarChart3, ExternalLink, RefreshCw } from 'lucide-react'
-import { arcTestnet } from 'viem/chains'
+import {
+  ArrowRight, Lock, TrendingUp, BarChart3,
+  RefreshCw, Globe, Activity, ChevronDown, ExternalLink,
+} from 'lucide-react'
 
-// ─── Contract addresses (Arc Testnet) ─────────────────────────────────────
-const VAULT_ADDRESS   = '0x1b4e782b2d95bcaa14f4e8e9b59787878470b4a4' as `0x${string}`
-const ORACLE_ADDRESS  = '0xe3d81cadae52ba4c3a56b2cbd180bd33ec16d154' as `0x${string}`
-const RATELOCK_ADDRESS = '0x372d0965f14dcd66263ee10941af08473a7149c3' as `0x${string}`
-const USDC_ADDRESS    = '0x3600000000000000000000000000000000000001' as `0x${string}`
-const ARC_CHAIN_ID    = arcTestnet.id   // 5042002
+// ── Network ──────────────────────────────────────────────────────────────────
+type Network = 'testnet' | 'mainnet'
 
-// bytes32("USD/NGN") — right-padded, 32 bytes
+const CHAINS: Record<Network, { chain: Chain; chainId: number; usdc: `0x${string}`; label: string; explorer: string }> = {
+  testnet: {
+    chain: arcTestnet,
+    chainId: arcTestnet.id,
+    usdc: '0x3600000000000000000000000000000000000000',
+    label: 'Arc Testnet',
+    explorer: 'https://explorer.testnet.arc.io',
+  },
+  mainnet: {
+    chain: arc,
+    chainId: arc.id,
+    usdc: '0x3600000000000000000000000000000000000000',
+    label: 'Arc Mainnet',
+    explorer: 'https://explorer.arc.io',
+  },
+}
+
+// Contract addresses from env (set at build time)
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
+const CONTRACTS: Record<Network, { vault: string; oracle: string; rateLock: string }> = {
+  testnet: {
+    vault: (import.meta.env.VITE_TESTNET_VAULT as string | undefined) ?? '',
+    oracle: (import.meta.env.VITE_TESTNET_PUSH_ORACLE as string | undefined) ?? '',
+    rateLock: (import.meta.env.VITE_TESTNET_RATELOCK as string | undefined) ?? '',
+  },
+  mainnet: {
+    vault: (import.meta.env.VITE_MAINNET_VAULT as string | undefined) ?? '',
+    oracle: (import.meta.env.VITE_MAINNET_PUSH_ORACLE as string | undefined) ?? '',
+    rateLock: (import.meta.env.VITE_MAINNET_RATELOCK as string | undefined) ?? '',
+  },
+}
+/* eslint-enable @typescript-eslint/no-unsafe-assignment */
+
+// USD/NGN bytes32 — right-padded ASCII
 const USD_NGN_PAIR = '0x5553442f4e474e00000000000000000000000000000000000000000000000000' as `0x${string}`
 
-// ─── ABIs (minimal) ────────────────────────────────────────────────────────
+// ── ABIs ──────────────────────────────────────────────────────────────────────
 const VAULT_ABI = [
   { name: 'deposit', type: 'function', stateMutability: 'nonpayable', inputs: [{ name: 'usdcAmount', type: 'uint256' }], outputs: [] },
   { name: 'withdraw', type: 'function', stateMutability: 'nonpayable', inputs: [{ name: 'sharesToBurn', type: 'uint256' }], outputs: [] },
   { name: 'shares', type: 'function', stateMutability: 'view', inputs: [{ name: '', type: 'address' }], outputs: [{ type: 'uint256' }] },
   { name: 'totalShares', type: 'function', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
-  { name: 'totalReserved', type: 'function', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
   { name: 'availableBalance', type: 'function', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
 ] as const
 
@@ -41,24 +73,79 @@ const RATELOCK_ABI = [
   { name: 'locks', type: 'function', stateMutability: 'view', inputs: [{ name: 'id', type: 'uint256' }], outputs: [{ name: 'pair', type: 'bytes32' }, { name: 'usdcIn', type: 'uint256' }, { name: 'lockedRate1e8', type: 'uint256' }, { name: 'lockedLocal', type: 'uint256' }, { name: 'reserved', type: 'uint256' }, { name: 'expiry', type: 'uint64' }, { name: 'taker', type: 'address' }, { name: 'payoutTo', type: 'address' }, { name: 'status', type: 'uint8' }] },
 ] as const
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 const fmt6 = (v: bigint) => Number(formatUnits(v, 6)).toFixed(2)
 const fmtRate = (r: bigint) => (Number(r) / 1e8).toFixed(2)
-const explorerTx = (hash: string) => `https://explorer.arctest.io/tx/${hash}`
+const fmtNum = (n: number, dp = 2) => n.toFixed(dp)
+const explorerTx = (hash: string, net: Network) => `${CHAINS[net].explorer}/tx/${hash}`
 
-type Tab = 'vault' | 'lock' | 'settle'
+// ── Oracle aggregator types ───────────────────────────────────────────────────
+interface OracleQuote {
+  source: string
+  price: number
+  updatedAt: number
+  confidence?: number
+  staleSecs?: number
+  error?: string
+}
 
-// ─── WrongChain banner ─────────────────────────────────────────────────────
-function WrongChainBanner() {
+interface AggregatedPrice {
+  pair: string
+  network: Network
+  bestPrice: number
+  bestSource: string
+  quotes: OracleQuote[]
+  fetchedAt: number
+}
+
+// ── API URL ───────────────────────────────────────────────────────────────────
+// In Docker the server runs on :3001; in static HF or local dev use relative path.
+// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+const API_BASE: string = (import.meta.env.VITE_API_BASE as string | undefined) ?? ''
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+type Tab = 'prices' | 'vault' | 'lock' | 'settle'
+
+// ════════════════════════════════════════════════════════════════════════════════
+// NetworkToggle
+// ════════════════════════════════════════════════════════════════════════════════
+function NetworkToggle({ network, onChange }: { network: Network; onChange: (n: Network) => void }) {
+  return (
+    <div className="flex items-center gap-1 rounded-xl p-1" style={{ background: 'var(--surface-muted)' }}>
+      {(['testnet', 'mainnet'] as Network[]).map(n => (
+        <button
+          key={n}
+          onClick={() => onChange(n)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition"
+          style={{
+            background: network === n ? 'var(--surface-strong)' : 'transparent',
+            color: network === n ? 'var(--ink)' : 'var(--subtle)',
+            boxShadow: network === n ? '0 1px 4px rgba(0,0,0,0.25)' : 'none',
+          }}
+        >
+          <Globe size={12} />
+          {n === 'testnet' ? 'Testnet' : 'Mainnet'}
+          {n === 'mainnet' && <span className="text-[9px] px-1 rounded" style={{ background: 'rgba(186,43,76,0.25)', color: '#fca5a5' }}>LIVE</span>}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// WrongChainBanner
+// ════════════════════════════════════════════════════════════════════════════════
+function WrongChainBanner({ network }: { network: Network }) {
   const { chainId } = useAccount()
   const { switchChain, isPending } = useSwitchChain()
-  if (chainId === ARC_CHAIN_ID) return null
+  const target = CHAINS[network].chainId
+  if (chainId === target) return null
   return (
     <div className="mb-4 flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium"
       style={{ background: 'rgba(186,43,76,0.18)', border: '1px solid var(--danger)', color: '#fca5a5' }}>
-      <span style={{ color: 'var(--danger)' }}>Switch to Arc Testnet to use RateLock.</span>
+      <span style={{ color: 'var(--danger)' }}>Switch to {CHAINS[network].label} to transact.</span>
       <button
-        onClick={() => switchChain({ chainId: ARC_CHAIN_ID })}
+        onClick={() => switchChain({ chainId: target })}
         disabled={isPending}
         className="ml-auto rounded-lg px-3 py-1 text-xs font-semibold transition"
         style={{ background: 'var(--danger)', color: '#fff' }}>
@@ -68,36 +155,238 @@ function WrongChainBanner() {
   )
 }
 
-// ─── Vault Panel ───────────────────────────────────────────────────────────
-function VaultPanel() {
+// ════════════════════════════════════════════════════════════════════════════════
+// OracleDashboard — the main prices tab
+// ════════════════════════════════════════════════════════════════════════════════
+const FX_PAIRS   = ['USD/NGN', 'USD/KES', 'USD/GHS', 'USD/ZAR', 'USD/EGP', 'USD/TZS', 'USD/UGX', 'USD/XOF']
+const CRYPTO_PAIRS = ['ETH/USD', 'BTC/USD', 'LINK/USD', 'USDC/USD']
+
+// Source colours: each oracle gets a distinct accent
+const SOURCE_COLORS: Record<string, string> = {
+  'PushRateOracle':     '#acc6e9', // arc blue
+  'Chainlink':          '#375bd2', // chainlink navy
+  'DIA':                '#e87a41', // DIA orange
+  'Pyth':               '#9945ff', // pyth purple
+  'ExchangeRate-API':   '#8dd89f', // green
+  'Fawaz Currency API': '#f0c040', // gold
+  'CurrencyAPI Mirror': '#a0a0c0', // muted
+}
+function sourceColor(s: string) { return SOURCE_COLORS[s] ?? 'var(--accent)' }
+
+// Decimals to show for a given quote currency
+function pairDp(pair: string) {
+  const q = pair.split('/')[1] ?? ''
+  if (['ZAR', 'TZS', 'UGX', 'XOF'].includes(q)) return 0
+  if (['NGN', 'KES', 'EGP'].includes(q)) return 2
+  return 4 // crypto
+}
+
+function PairRow({ pair, network, isSelected, onSelect }: { pair: string; network: Network; isSelected: boolean; onSelect: () => void }) {
+  const [data, setData] = useState<AggregatedPrice | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    try {
+      const encoded = pair.replace('/', '-')
+      const res = await fetch(`${API_BASE}/price/${encoded}?network=${network}`)
+      if (res.ok) setData(await res.json() as AggregatedPrice)
+    } catch { /* silent */ }
+    finally { setLoading(false) }
+  }, [pair, network])
+
+  // eslint-disable-next-line react/set-state-in-effect -- async data fetch, state update is intentional
+  useEffect(() => { void refresh() }, [refresh])
+
+  // Auto-refresh every 30s
+  useEffect(() => {
+    const t = setInterval(() => { void refresh() }, 30_000)
+    return () => clearInterval(t)
+  }, [refresh])
+
+  const [base, quote] = pair.split('/')
+  const dp = pairDp(pair)
+  const validQuotes = data?.quotes.filter(q => q.price > 0 && !q.error) ?? []
+  const spread = validQuotes.length >= 2
+    ? ((Math.max(...validQuotes.map(q => q.price)) - Math.min(...validQuotes.map(q => q.price))) / (data?.bestPrice ?? 1) * 100).toFixed(2)
+    : null
+
+  return (
+    <div
+      className="rounded-xl p-4 cursor-pointer transition"
+      onClick={onSelect}
+      style={{
+        background: isSelected ? 'var(--surface-strong)' : 'var(--surface)',
+        border: `1px solid ${isSelected ? 'var(--accent)' : 'var(--border)'}`,
+      }}
+    >
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <span className="display font-bold text-base" style={{ color: 'var(--ink)' }}>{base}</span>
+          <span className="text-xs" style={{ color: 'var(--subtle)' }}>/{quote}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          {/* source dots */}
+          {validQuotes.map(q => (
+            <span key={q.source} title={q.source} className="w-2 h-2 rounded-full" style={{ background: sourceColor(q.source) }} />
+          ))}
+          {loading && <RefreshCw size={12} className="animate-spin" style={{ color: 'var(--subtle)' }} />}
+          <ChevronDown size={14} style={{ color: 'var(--subtle)', transform: isSelected ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
+        </div>
+      </div>
+
+      <div className="flex items-end justify-between">
+        <div>
+          <p className="display text-2xl font-semibold tabular" style={{ color: 'var(--ink)' }}>
+            {data?.bestPrice ? fmtNum(data.bestPrice, dp) : '—'}
+          </p>
+          <p className="text-xs mt-0.5" style={{ color: sourceColor(data?.bestSource ?? '') }}>
+            {data?.bestSource ?? 'loading…'}
+          </p>
+        </div>
+        <div className="text-right">
+          {spread && (
+            <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: 'rgba(172,198,233,0.12)', color: 'var(--accent)' }}>
+              ±{spread}% spread
+            </span>
+          )}
+          <p className="text-xs mt-1" style={{ color: 'var(--subtle)' }}>
+            {data ? `${validQuotes.length}/${data.quotes.length} sources` : ''}
+          </p>
+        </div>
+      </div>
+
+      {/* Source breakdown (expanded) */}
+      {isSelected && data && (
+        <div className="mt-3 pt-3 space-y-2" style={{ borderTop: '1px solid var(--border)' }}>
+          <p className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: 'var(--subtle)', letterSpacing: '0.08em' }}>All sources</p>
+          {data.quotes.map(q => (
+            <div key={q.source} className="flex items-center justify-between text-xs">
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: q.error ? 'var(--danger)' : sourceColor(q.source) }} />
+                <span style={{ color: q.error ? 'var(--subtle)' : 'var(--ink-2)' }}>{q.source}</span>
+                {q.source === 'PushRateOracle' && <span className="text-[9px] px-1 rounded" style={{ background: 'rgba(172,198,233,0.15)', color: 'var(--accent)' }}>on-chain</span>}
+                {q.source === 'Chainlink' && <span className="text-[9px] px-1 rounded" style={{ background: 'rgba(55,91,210,0.2)', color: '#7fa8f7' }}>Ethereum</span>}
+                {q.source === 'DIA' && <span className="text-[9px] px-1 rounded" style={{ background: 'rgba(232,122,65,0.15)', color: '#e87a41' }}>decentralized</span>}
+                {q.source === 'Pyth' && <span className="text-[9px] px-1 rounded" style={{ background: 'rgba(153,69,255,0.15)', color: '#9945ff' }}>pull model</span>}
+              </div>
+              <div className="text-right">
+                {q.error ? (
+                  <span style={{ color: 'var(--subtle)' }}>{q.error.slice(0, 45)}</span>
+                ) : (
+                  <>
+                    <span className="tabular font-semibold" style={{ color: q.source === data.bestSource ? 'var(--success)' : 'var(--ink-2)' }}>
+                      {fmtNum(q.price, dp)}
+                    </span>
+                    {q.staleSecs !== undefined && (
+                      <span className="ml-2" style={{ color: q.staleSecs > 3600 ? 'var(--danger)' : 'var(--subtle)' }}>
+                        {q.staleSecs < 60 ? `${q.staleSecs}s` : `${Math.floor(q.staleSecs / 60)}m`} ago
+                      </span>
+                    )}
+                    {q.confidence !== undefined && q.confidence > 0 && (
+                      <span className="ml-2" style={{ color: 'var(--subtle)' }}>±{fmtNum(q.confidence, dp)}</span>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function OracleDashboard({ network }: { network: Network }) {
+  const [selected, setSelected] = useState<string | null>('USD/NGN')
+  const [showCrypto, setShowCrypto] = useState(false)
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 mb-2">
+        <Activity size={14} style={{ color: 'var(--accent)' }} />
+        <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: 'var(--subtle)', letterSpacing: '0.08em' }}>Live Rates · USD Base</p>
+        <span className="ml-auto text-xs px-2 py-0.5 rounded-full" style={{ background: 'rgba(141,216,159,0.12)', color: 'var(--success)' }}>30s</span>
+      </div>
+
+      {/* Category tabs */}
+      <div className="flex gap-1 p-1 rounded-xl" style={{ background: 'var(--surface-muted)' }}>
+        {[false, true].map(isCrypto => (
+          <button key={String(isCrypto)} onClick={() => setShowCrypto(isCrypto)}
+            className="flex-1 py-1.5 rounded-lg text-xs font-semibold transition"
+            style={{ background: showCrypto === isCrypto ? 'var(--surface-strong)' : 'transparent', color: showCrypto === isCrypto ? 'var(--ink)' : 'var(--subtle)' }}>
+            {isCrypto ? 'Crypto' : 'FX / African'}
+          </button>
+        ))}
+      </div>
+
+      {(showCrypto ? CRYPTO_PAIRS : FX_PAIRS).map(pair => (
+        <PairRow
+          key={pair}
+          pair={pair}
+          network={network}
+          isSelected={selected === pair}
+          onSelect={() => setSelected(selected === pair ? null : pair)}
+        />
+      ))}
+
+      {/* Source legend */}
+      <div className="rounded-xl p-3 mt-1" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
+        <p className="text-xs font-semibold mb-2" style={{ color: 'var(--ink-2)' }}>Oracle sources</p>
+        <div className="flex flex-wrap gap-x-3 gap-y-1.5">
+          {Object.entries(SOURCE_COLORS).map(([name, color]) => (
+            <span key={name} className="flex items-center gap-1 text-xs" style={{ color: 'var(--subtle)' }}>
+              <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: color }} />
+              {name}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* API hint */}
+      <div className="rounded-xl p-3 text-xs" style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--subtle)' }}>
+        <p className="font-semibold mb-1" style={{ color: 'var(--ink-2)' }}>Public Price API</p>
+        <code style={{ color: 'var(--accent)' }}>GET /price/USD-NGN?network={network}</code>
+        <p className="mt-1">WebSocket: <code style={{ color: 'var(--accent)' }}>ws://oracle.pesarc.xyz/ws</code></p>
+      </div>
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// VaultPanel
+// ════════════════════════════════════════════════════════════════════════════════
+function VaultPanel({ network }: { network: Network }) {
   const { address, chainId } = useAccount()
   const { switchChain } = useSwitchChain()
   const [amount, setAmount] = useState('')
   const [mode, setMode] = useState<'deposit' | 'withdraw'>('deposit')
+  const chainId_ = CHAINS[network].chainId
+  const USDC = CHAINS[network].usdc
+  const VAULT = CONTRACTS[network].vault as `0x${string}`
 
   const { data: usdcBalance, refetch: refetchBalance } = useReadContract({
-    address: USDC_ADDRESS, abi: erc20Abi, functionName: 'balanceOf',
-    args: address ? [address] : undefined, chainId: ARC_CHAIN_ID,
+    address: USDC, abi: erc20Abi, functionName: 'balanceOf',
+    args: address ? [address] : undefined, chainId: chainId_,
     query: { enabled: !!address },
   })
   const { data: myShares, refetch: refetchShares } = useReadContract({
-    address: VAULT_ADDRESS || undefined, abi: VAULT_ABI, functionName: 'shares',
-    args: address ? [address] : undefined, chainId: ARC_CHAIN_ID,
-    query: { enabled: !!address && !!VAULT_ADDRESS },
+    address: VAULT || undefined, abi: VAULT_ABI, functionName: 'shares',
+    args: address ? [address] : undefined, chainId: chainId_,
+    query: { enabled: !!address && !!VAULT },
   })
   const { data: totalShares } = useReadContract({
-    address: VAULT_ADDRESS || undefined, abi: VAULT_ABI, functionName: 'totalShares',
-    chainId: ARC_CHAIN_ID, query: { enabled: !!VAULT_ADDRESS },
+    address: VAULT || undefined, abi: VAULT_ABI, functionName: 'totalShares',
+    chainId: chainId_, query: { enabled: !!VAULT },
   })
   const { data: availBal } = useReadContract({
-    address: VAULT_ADDRESS || undefined, abi: VAULT_ABI, functionName: 'availableBalance',
-    chainId: ARC_CHAIN_ID, query: { enabled: !!VAULT_ADDRESS },
+    address: VAULT || undefined, abi: VAULT_ABI, functionName: 'availableBalance',
+    chainId: chainId_, query: { enabled: !!VAULT },
   })
-
   const { data: allowance, refetch: refetchAllowance } = useReadContract({
-    address: USDC_ADDRESS, abi: erc20Abi, functionName: 'allowance',
-    args: address && VAULT_ADDRESS ? [address, VAULT_ADDRESS] : undefined,
-    chainId: ARC_CHAIN_ID, query: { enabled: !!address && !!VAULT_ADDRESS },
+    address: USDC, abi: erc20Abi, functionName: 'allowance',
+    args: address && VAULT ? [address, VAULT] : undefined,
+    chainId: chainId_, query: { enabled: !!address && !!VAULT },
   })
 
   const { writeContract, data: txHash, isPending, reset } = useWriteContract()
@@ -108,31 +397,23 @@ function VaultPanel() {
 
   const handleAction = useCallback(() => {
     if (!address) return
-    if (chainId !== ARC_CHAIN_ID) { switchChain({ chainId: ARC_CHAIN_ID }); return }
-    if (!VAULT_ADDRESS) { toast.error('Vault address not set.'); return }
-
-    try {
-      if (mode === 'deposit') {
-        if (needsApproval) {
-          writeContract({ address: USDC_ADDRESS, abi: erc20Abi, functionName: 'approve', args: [VAULT_ADDRESS, parsedAmount] })
-        } else {
-          writeContract({ address: VAULT_ADDRESS, abi: VAULT_ABI, functionName: 'deposit', args: [parsedAmount] })
-        }
+    if (chainId !== chainId_) { switchChain({ chainId: chainId_ }); return }
+    if (!VAULT) { toast.error('Vault not deployed on this network yet.'); return }
+    if (mode === 'deposit') {
+      if (needsApproval) {
+        writeContract({ address: USDC, abi: erc20Abi, functionName: 'approve', args: [VAULT, parsedAmount] })
       } else {
-        // withdraw: sharesToBurn = amount as share units (1e12 scale from 6-decimal USDC)
-        const sharesToBurn = parsedAmount * 1_000_000_000_000n
-        writeContract({ address: VAULT_ADDRESS, abi: VAULT_ABI, functionName: 'withdraw', args: [sharesToBurn] })
+        writeContract({ address: VAULT, abi: VAULT_ABI, functionName: 'deposit', args: [parsedAmount] })
       }
-    } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : 'Transaction failed')
+    } else {
+      const sharesToBurn = parsedAmount * 1_000_000_000_000n
+      writeContract({ address: VAULT, abi: VAULT_ABI, functionName: 'withdraw', args: [sharesToBurn] })
     }
-  }, [address, chainId, mode, parsedAmount, needsApproval, switchChain, writeContract])
+  }, [address, chainId, chainId_, mode, parsedAmount, needsApproval, USDC, VAULT, switchChain, writeContract])
 
   if (isSuccess) {
     void refetchBalance(); void refetchShares(); void refetchAllowance()
-    toast.success(
-      <span>Done! <a href={explorerTx(txHash!)} target="_blank" rel="noopener" className="underline">View on explorer</a></span>
-    )
+    toast.success(<span>Done! <a href={explorerTx(txHash!, network)} target="_blank" rel="noopener" className="underline">View on explorer</a></span>)
     reset()
   }
 
@@ -141,7 +422,11 @@ function VaultPanel() {
 
   return (
     <div className="space-y-4">
-      {/* LP stats */}
+      {!VAULT && (
+        <div className="rounded-xl p-3 text-xs text-center" style={{ background: 'rgba(186,43,76,0.1)', color: '#fca5a5', border: '1px solid var(--danger)' }}>
+          LiquidityVault not deployed on {CHAINS[network].label} yet.
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-3">
         <StatCard label="Your USDC" value={usdcBalance !== undefined ? `${fmt6(usdcBalance)} USDC` : '—'} />
         <StatCard label="Your Pool Value" value={myShares !== undefined ? `${fmt6(lpShareValue)} USDC` : '—'} />
@@ -151,8 +436,6 @@ function VaultPanel() {
           Pool available: <span className="tabular" style={{ color: 'var(--muted)' }}>{fmt6(availBal)} USDC</span>
         </p>
       )}
-
-      {/* Mode toggle */}
       <div className="flex rounded-xl overflow-hidden" style={{ background: 'var(--surface-muted)' }}>
         {(['deposit', 'withdraw'] as const).map(m => (
           <button key={m} onClick={() => setMode(m)}
@@ -162,14 +445,9 @@ function VaultPanel() {
           </button>
         ))}
       </div>
-
-      {/* Amount */}
       <AmountInput value={amount} onChange={setAmount} label="USDC amount" placeholder="0.00" />
-
       <ActionButton
-        onClick={handleAction}
-        isPending={isPending}
-        isConfirming={isConfirming}
+        onClick={handleAction} isPending={isPending} isConfirming={isConfirming}
         disabled={!parsedAmount}
         label={needsApproval ? 'Approve USDC' : mode === 'deposit' ? 'Deposit to Pool' : 'Withdraw from Pool'}
       />
@@ -177,39 +455,40 @@ function VaultPanel() {
   )
 }
 
-// ─── Lock Panel ────────────────────────────────────────────────────────────
-function LockPanel() {
+// ════════════════════════════════════════════════════════════════════════════════
+// LockPanel
+// ════════════════════════════════════════════════════════════════════════════════
+function LockPanel({ network }: { network: Network }) {
   const { address, chainId } = useAccount()
   const { switchChain } = useSwitchChain()
   const [usdcIn, setUsdcIn] = useState('')
   const [days, setDays] = useState('7')
+  const chainId_ = CHAINS[network].chainId
+  const USDC = CHAINS[network].usdc
+  const RATELOCK = CONTRACTS[network].rateLock as `0x${string}`
+  const ORACLE = CONTRACTS[network].oracle as `0x${string}`
 
   const { data: oracleData } = useReadContract({
-    address: ORACLE_ADDRESS || undefined, abi: ORACLE_ABI, functionName: 'latestData',
-    args: [USD_NGN_PAIR], chainId: ARC_CHAIN_ID,
-    query: { enabled: !!ORACLE_ADDRESS, refetchInterval: 30_000 },
+    address: ORACLE || undefined, abi: ORACLE_ABI, functionName: 'latestData',
+    args: [USD_NGN_PAIR], chainId: chainId_,
+    query: { enabled: !!ORACLE, refetchInterval: 30_000 },
   })
   const currentRate = oracleData?.[0] ?? 0n
   const updatedAt = oracleData?.[1] ?? 0n
-
   const parsedUsdcIn = usdcIn ? parseUnits(usdcIn, 6) : 0n
-
   const { data: premium } = useReadContract({
-    address: RATELOCK_ADDRESS || undefined, abi: RATELOCK_ABI, functionName: 'quotePremium',
+    address: RATELOCK || undefined, abi: RATELOCK_ABI, functionName: 'quotePremium',
     args: parsedUsdcIn > 0n ? [parsedUsdcIn, USD_NGN_PAIR] : undefined,
-    chainId: ARC_CHAIN_ID, query: { enabled: !!RATELOCK_ADDRESS && parsedUsdcIn > 0n },
+    chainId: chainId_, query: { enabled: !!RATELOCK && parsedUsdcIn > 0n },
   })
-
   const lockedLocal = parsedUsdcIn > 0n && currentRate > 0n
     ? (parsedUsdcIn * currentRate) / 100_000_000n : 0n
-
-  const { data: allowance, refetch: refetchAllowance } = useReadContract({
-    address: USDC_ADDRESS, abi: erc20Abi, functionName: 'allowance',
-    args: address && RATELOCK_ADDRESS ? [address, RATELOCK_ADDRESS] : undefined,
-    chainId: ARC_CHAIN_ID, query: { enabled: !!address && !!RATELOCK_ADDRESS },
-  })
-
   const totalNeeded = parsedUsdcIn + (premium ?? 0n)
+  const { data: allowance, refetch: refetchAllowance } = useReadContract({
+    address: USDC, abi: erc20Abi, functionName: 'allowance',
+    args: address && RATELOCK ? [address, RATELOCK] : undefined,
+    chainId: chainId_, query: { enabled: !!address && !!RATELOCK },
+  })
   const needsApproval = allowance !== undefined && totalNeeded > allowance && totalNeeded > 0n
 
   const { writeContract, data: txHash, isPending, reset } = useWriteContract()
@@ -217,25 +496,19 @@ function LockPanel() {
 
   const handleAction = useCallback(() => {
     if (!address) return
-    if (chainId !== ARC_CHAIN_ID) { switchChain({ chainId: ARC_CHAIN_ID }); return }
-    if (!RATELOCK_ADDRESS) { toast.error('RateLock not deployed yet.'); return }
-
+    if (chainId !== chainId_) { switchChain({ chainId: chainId_ }); return }
+    if (!RATELOCK) { toast.error('RateLock not deployed on this network yet.'); return }
     if (needsApproval) {
-      writeContract({ address: USDC_ADDRESS, abi: erc20Abi, functionName: 'approve', args: [RATELOCK_ADDRESS, totalNeeded] })
+      writeContract({ address: USDC, abi: erc20Abi, functionName: 'approve', args: [RATELOCK, totalNeeded] })
     } else {
       const expiry = BigInt(Math.floor(Date.now() / 1000) + parseInt(days) * 86400)
-      writeContract({
-        address: RATELOCK_ADDRESS, abi: RATELOCK_ABI, functionName: 'openLock',
-        args: [USD_NGN_PAIR, parsedUsdcIn, currentRate, expiry, address],
-      })
+      writeContract({ address: RATELOCK, abi: RATELOCK_ABI, functionName: 'openLock', args: [USD_NGN_PAIR, parsedUsdcIn, currentRate, expiry, address] })
     }
-  }, [address, chainId, needsApproval, parsedUsdcIn, currentRate, days, totalNeeded, switchChain, writeContract])
+  }, [address, chainId, chainId_, needsApproval, parsedUsdcIn, currentRate, days, totalNeeded, USDC, RATELOCK, switchChain, writeContract])
 
   if (isSuccess) {
     void refetchAllowance()
-    toast.success(
-      <span>Lock opened! <a href={explorerTx(txHash!)} target="_blank" rel="noopener" className="underline">View on explorer</a></span>
-    )
+    toast.success(<span>Lock opened! <a href={explorerTx(txHash!, network)} target="_blank" rel="noopener" className="underline">View on explorer <ExternalLink size={12} className="inline" /></a></span>)
     reset()
   }
 
@@ -248,9 +521,13 @@ function LockPanel() {
 
   return (
     <div className="space-y-4">
-      {/* Oracle rate */}
+      {!RATELOCK && (
+        <div className="rounded-xl p-3 text-xs text-center" style={{ background: 'rgba(186,43,76,0.1)', color: '#fca5a5', border: '1px solid var(--danger)' }}>
+          RateLock not deployed on {CHAINS[network].label} yet.
+        </div>
+      )}
       <div className="rounded-xl p-4" style={{ background: 'var(--surface-muted)', border: '1px solid var(--border)' }}>
-        <p className="text-xs uppercase tracking-widest mb-1" style={{ color: 'var(--subtle)', letterSpacing: '0.08em' }}>Live Rate · USD/NGN</p>
+        <p className="text-xs uppercase tracking-widest mb-1" style={{ color: 'var(--subtle)', letterSpacing: '0.08em' }}>On-Chain Rate · USD/NGN</p>
         <p className="display text-3xl font-semibold" style={{ color: 'var(--ink)' }}>
           {currentRate > 0n ? `₦${fmtRate(currentRate)}` : '—'}
           <span className="text-base font-normal ml-2" style={{ color: 'var(--subtle)' }}>per USDC</span>
@@ -262,10 +539,7 @@ function LockPanel() {
           </p>
         )}
       </div>
-
       <AmountInput value={usdcIn} onChange={setUsdcIn} label="Amount to lock (USDC)" placeholder="0.00" />
-
-      {/* Expiry */}
       <div>
         <label className="text-xs mb-1 block" style={{ color: 'var(--subtle)' }}>Lock duration</label>
         <div className="flex gap-2">
@@ -278,8 +552,6 @@ function LockPanel() {
           ))}
         </div>
       </div>
-
-      {/* Preview */}
       {parsedUsdcIn > 0n && currentRate > 0n && (
         <div className="rounded-xl p-4 space-y-2 text-sm" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
           <PreviewRow label="Guaranteed local value" value={`₦${fmt6(lockedLocal)}`} highlight />
@@ -288,11 +560,7 @@ function LockPanel() {
           <PreviewRow label="Locked rate" value={`₦${fmtRate(currentRate)}/USDC`} />
         </div>
       )}
-
-      <ActionButton
-        onClick={handleAction}
-        isPending={isPending}
-        isConfirming={isConfirming}
+      <ActionButton onClick={handleAction} isPending={isPending} isConfirming={isConfirming}
         disabled={!parsedUsdcIn || !currentRate}
         label={needsApproval ? 'Approve USDC' : 'Open Lock'}
       />
@@ -300,50 +568,50 @@ function LockPanel() {
   )
 }
 
-// ─── Settle Panel ──────────────────────────────────────────────────────────
-function LockRow({ id }: { id: bigint }) {
+// ════════════════════════════════════════════════════════════════════════════════
+// SettlePanel (unchanged logic, network-aware)
+// ════════════════════════════════════════════════════════════════════════════════
+function LockRow({ id, network }: { id: bigint; network: Network }) {
   const { chainId } = useAccount()
   const { switchChain } = useSwitchChain()
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  const chainId_ = CHAINS[network].chainId
+  const RATELOCK = CONTRACTS[network].rateLock as `0x${string}`
+  const ORACLE = CONTRACTS[network].oracle as `0x${string}`
 
-  // Refresh clock every minute so canSettle flips without page reload
   useEffect(() => {
     const t = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 60_000)
     return () => clearInterval(t)
   }, [])
 
   const { data: lock } = useReadContract({
-    address: RATELOCK_ADDRESS || undefined, abi: RATELOCK_ABI, functionName: 'locks',
-    args: [id], chainId: ARC_CHAIN_ID, query: { enabled: !!RATELOCK_ADDRESS },
+    address: RATELOCK || undefined, abi: RATELOCK_ABI, functionName: 'locks',
+    args: [id], chainId: chainId_, query: { enabled: !!RATELOCK },
   })
   const { data: oracleData } = useReadContract({
-    address: ORACLE_ADDRESS || undefined, abi: ORACLE_ABI, functionName: 'latestData',
-    args: [USD_NGN_PAIR], chainId: ARC_CHAIN_ID,
-    query: { enabled: !!ORACLE_ADDRESS, refetchInterval: 30_000 },
+    address: ORACLE || undefined, abi: ORACLE_ABI, functionName: 'latestData',
+    args: [USD_NGN_PAIR], chainId: chainId_,
+    query: { enabled: !!ORACLE, refetchInterval: 30_000 },
   })
 
   const { writeContract, data: txHash, isPending, reset } = useWriteContract()
   const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash: txHash })
 
   if (isSuccess) {
-    toast.success(
-      <span>Lock #{id.toString()} settled! <a href={explorerTx(txHash!)} target="_blank" rel="noopener" className="underline">View on explorer <ExternalLink size={12} className="inline" /></a></span>
-    )
+    toast.success(<span>Lock #{id.toString()} settled! <a href={explorerTx(txHash!, network)} target="_blank" rel="noopener" className="underline">View <ExternalLink size={12} className="inline" /></a></span>)
     reset()
   }
 
   if (!lock) return null
   const [, usdcIn, lockedRate1e8, lockedLocal, , expiry, , , status] = lock
-  if (status !== 0) return null // only show Open locks
+  if (status !== 0) return null
 
   const canSettle = BigInt(nowSec) >= expiry
   const expiryDate = new Date(Number(expiry) * 1000).toLocaleDateString()
-
   const currentRate = oracleData?.[0] ?? 0n
   const projPayout = currentRate > 0n ? (lockedLocal * 100_000_000n) / currentRate : 0n
-  const cap = usdcIn + ((usdcIn * 1000n) / 10000n) // approximate cap at 10% maxMove
+  const cap = usdcIn + ((usdcIn * 1000n) / 10000n)
   const cappedPayout = projPayout > cap ? cap : projPayout
-  const lpGain = Number(usdcIn) - Number(cappedPayout)
 
   return (
     <div className="rounded-xl p-4 space-y-3" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
@@ -357,63 +625,33 @@ function LockRow({ id }: { id: bigint }) {
           {canSettle ? 'Ready' : 'Pending'}
         </span>
       </div>
-
       <div className="grid grid-cols-2 gap-2 text-xs">
-        <div>
-          <p style={{ color: 'var(--subtle)' }}>Locked rate</p>
-          <p className="tabular font-semibold mt-0.5" style={{ color: 'var(--ink-2)' }}>₦{fmtRate(lockedRate1e8)}</p>
-        </div>
-        <div>
-          <p style={{ color: 'var(--subtle)' }}>Current rate</p>
-          <p className="tabular font-semibold mt-0.5" style={{ color: 'var(--ink-2)' }}>
-            {currentRate > 0n ? `₦${fmtRate(currentRate)}` : '—'}
-          </p>
-        </div>
-        <div>
-          <p style={{ color: 'var(--subtle)' }}>Expires</p>
-          <p className="tabular font-semibold mt-0.5" style={{ color: 'var(--ink-2)' }}>{expiryDate}</p>
-        </div>
-        <div>
-          <p style={{ color: 'var(--subtle)' }}>Est. payout</p>
-          <p className="tabular font-semibold mt-0.5" style={{ color: lpGain < 0 ? 'var(--success)' : 'var(--danger)' }}>
-            {currentRate > 0n ? `${fmt6(cappedPayout)} USDC` : '—'}
-          </p>
-        </div>
+        <div><p style={{ color: 'var(--subtle)' }}>Locked rate</p><p className="tabular font-semibold mt-0.5" style={{ color: 'var(--ink-2)' }}>₦{fmtRate(lockedRate1e8)}</p></div>
+        <div><p style={{ color: 'var(--subtle)' }}>Current rate</p><p className="tabular font-semibold mt-0.5" style={{ color: 'var(--ink-2)' }}>{currentRate > 0n ? `₦${fmtRate(currentRate)}` : '—'}</p></div>
+        <div><p style={{ color: 'var(--subtle)' }}>Expires</p><p className="tabular font-semibold mt-0.5" style={{ color: 'var(--ink-2)' }}>{expiryDate}</p></div>
+        <div><p style={{ color: 'var(--subtle)' }}>Est. payout</p><p className="tabular font-semibold mt-0.5" style={{ color: 'var(--success)' }}>{currentRate > 0n ? `${fmt6(cappedPayout)} USDC` : '—'}</p></div>
       </div>
-
       <ActionButton
-        onClick={() => {
-          if (chainId !== ARC_CHAIN_ID) { switchChain({ chainId: ARC_CHAIN_ID }); return }
-          if (!RATELOCK_ADDRESS) { toast.error('RateLock not deployed yet.'); return }
-          writeContract({ address: RATELOCK_ADDRESS, abi: RATELOCK_ABI, functionName: 'settle', args: [id] })
-        }}
-        isPending={isPending}
-        isConfirming={isConfirming}
-        disabled={!canSettle}
-        label={canSettle ? 'Settle Lock' : `Settles ${expiryDate}`}
-        compact
+        onClick={() => { if (chainId !== chainId_) { switchChain({ chainId: chainId_ }); return } writeContract({ address: RATELOCK, abi: RATELOCK_ABI, functionName: 'settle', args: [id] }) }}
+        isPending={isPending} isConfirming={isConfirming} disabled={!canSettle}
+        label={canSettle ? 'Settle Lock' : `Settles ${expiryDate}`} compact
       />
     </div>
   )
 }
 
-function SettlePanel() {
+function SettlePanel({ network }: { network: Network }) {
   const { address } = useAccount()
   const [lockId, setLockId] = useState('')
+  const chainId_ = CHAINS[network].chainId
+  const RATELOCK = CONTRACTS[network].rateLock as `0x${string}`
 
   const { data: nextId } = useReadContract({
-    address: RATELOCK_ADDRESS || undefined, abi: RATELOCK_ABI, functionName: 'nextId',
-    chainId: ARC_CHAIN_ID, query: { enabled: !!RATELOCK_ADDRESS, refetchInterval: 10_000 },
+    address: RATELOCK || undefined, abi: RATELOCK_ABI, functionName: 'nextId',
+    chainId: chainId_, query: { enabled: !!RATELOCK, refetchInterval: 10_000 },
   })
-
-  const ids: bigint[] = nextId !== undefined
-    ? Array.from({ length: Number(nextId) }, (_, i) => BigInt(i))
-    : []
-
-  // Filter to show only entered lock ID if provided, else show all
-  const displayIds = lockId && !isNaN(parseInt(lockId))
-    ? [BigInt(parseInt(lockId))]
-    : ids
+  const ids: bigint[] = nextId !== undefined ? Array.from({ length: Number(nextId) }, (_, i) => BigInt(i)) : []
+  const displayIds = lockId && !isNaN(parseInt(lockId)) ? [BigInt(parseInt(lockId))] : ids
 
   if (!address) return (
     <div className="flex flex-col items-center justify-center py-12 gap-3 text-center" style={{ color: 'var(--subtle)' }}>
@@ -424,35 +662,30 @@ function SettlePanel() {
 
   return (
     <div className="space-y-4">
-      {/* Search by ID */}
       <div>
         <label className="text-xs mb-1 block" style={{ color: 'var(--subtle)' }}>Filter by lock ID (optional)</label>
-        <input
-          type="number" min="0" value={lockId} onChange={e => setLockId(e.target.value)}
-          placeholder="0"
+        <input type="number" min="0" value={lockId} onChange={e => setLockId(e.target.value)} placeholder="0"
           className="w-full rounded-xl px-4 py-3 text-sm outline-none transition"
-          style={{ background: 'var(--surface-muted)', color: 'var(--ink)', border: '1px solid var(--border)' }}
-        />
+          style={{ background: 'var(--surface-muted)', color: 'var(--ink)', border: '1px solid var(--border)' }} />
       </div>
-
-      {!RATELOCK_ADDRESS ? (
+      {!RATELOCK ? (
         <div className="rounded-xl p-4 text-sm text-center" style={{ background: 'var(--surface)', color: 'var(--subtle)' }}>
-          No contracts configured.
+          RateLock not deployed on {CHAINS[network].label} yet.
         </div>
       ) : displayIds.length === 0 ? (
-        <div className="rounded-xl p-4 text-sm text-center" style={{ background: 'var(--surface)', color: 'var(--subtle)' }}>
-          No open locks found.
-        </div>
+        <div className="rounded-xl p-4 text-sm text-center" style={{ background: 'var(--surface)', color: 'var(--subtle)' }}>No open locks found.</div>
       ) : (
         <div className="space-y-3">
-          {displayIds.map(id => <LockRow key={id.toString()} id={id} />)}
+          {displayIds.map(id => <LockRow key={id.toString()} id={id} network={network} />)}
         </div>
       )}
     </div>
   )
 }
 
-// ─── Shared components ─────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════════
+// Shared components
+// ════════════════════════════════════════════════════════════════════════════════
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-xl p-3" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
@@ -461,7 +694,6 @@ function StatCard({ label, value }: { label: string; value: string }) {
     </div>
   )
 }
-
 function PreviewRow({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
   return (
     <div className="flex items-center justify-between">
@@ -470,117 +702,126 @@ function PreviewRow({ label, value, highlight }: { label: string; value: string;
     </div>
   )
 }
-
 function AmountInput({ value, onChange, label, placeholder }: { value: string; onChange: (v: string) => void; label: string; placeholder: string }) {
   return (
     <div>
       <label className="text-xs mb-1 block" style={{ color: 'var(--subtle)' }}>{label}</label>
       <div className="flex items-center rounded-xl overflow-hidden" style={{ background: 'var(--surface-muted)', border: '1px solid var(--border)' }}>
-        <input
-          type="number" min="0" step="0.01" value={value}
-          onChange={e => onChange(e.target.value)}
-          placeholder={placeholder}
-          className="flex-1 bg-transparent px-4 py-3 text-lg font-semibold outline-none tabular"
-          style={{ color: 'var(--ink)' }}
-        />
+        <input type="number" min="0" step="0.01" value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+          className="flex-1 bg-transparent px-4 py-3 text-lg font-semibold outline-none tabular" style={{ color: 'var(--ink)' }} />
         <span className="px-4 text-sm font-medium" style={{ color: 'var(--subtle)' }}>USDC</span>
       </div>
     </div>
   )
 }
-
 function ActionButton({ onClick, isPending, isConfirming, disabled, label, compact }: {
   onClick: () => void; isPending: boolean; isConfirming: boolean; disabled: boolean; label: string; compact?: boolean
 }) {
   const busy = isPending || isConfirming
   return (
-    <button
-      onClick={onClick}
-      disabled={disabled || busy}
+    <button onClick={onClick} disabled={disabled || busy}
       className={`w-full ${compact ? 'py-2.5 text-sm' : 'py-3.5 text-base'} rounded-xl font-semibold transition flex items-center justify-center gap-2`}
-      style={{
-        background: disabled || busy ? 'var(--surface-muted)' : 'var(--accent)',
-        color: disabled || busy ? 'var(--subtle)' : '#0d1b2f',
-        cursor: disabled || busy ? 'not-allowed' : 'pointer',
-      }}
-    >
+      style={{ background: disabled || busy ? 'var(--surface-muted)' : 'var(--accent)', color: disabled || busy ? 'var(--subtle)' : '#0d1b2f', cursor: disabled || busy ? 'not-allowed' : 'pointer' }}>
       {busy ? <RefreshCw size={16} className="animate-spin" /> : <ArrowRight size={16} />}
       {isPending ? 'Confirm in wallet…' : isConfirming ? 'Confirming…' : label}
     </button>
   )
 }
 
-// ─── App ────────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════════
+// WebSocket status indicator
+// ════════════════════════════════════════════════════════════════════════════════
+function WsStatus({ apiBase }: { apiBase: string }) {
+  const [connected, setConnected] = useState(false)
+  const wsRef = useRef<WebSocket | null>(null)
+
+  useEffect(() => {
+    if (!apiBase) return // static deploy — no WS server
+    const wsUrl = apiBase.replace(/^http/, 'ws') + '/ws'
+    const ws = new WebSocket(wsUrl)
+    wsRef.current = ws
+    ws.onopen = () => setConnected(true)
+    ws.onclose = () => setConnected(false)
+    ws.onerror = () => setConnected(false)
+    return () => { ws.close() }
+  }, [apiBase])
+
+  if (!apiBase) return null
+  return (
+    <span className="flex items-center gap-1 text-xs" style={{ color: connected ? 'var(--success)' : 'var(--subtle)' }}>
+      <span className="w-1.5 h-1.5 rounded-full" style={{ background: connected ? 'var(--success)' : 'var(--border)' }} />
+      {connected ? 'WS live' : 'WS off'}
+    </span>
+  )
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// App root
+// ════════════════════════════════════════════════════════════════════════════════
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
+  { id: 'prices', label: 'Prices', icon: <Activity size={16} /> },
   { id: 'vault', label: 'Fund Pool', icon: <BarChart3 size={16} /> },
   { id: 'lock', label: 'Open Lock', icon: <Lock size={16} /> },
   { id: 'settle', label: 'Settle', icon: <TrendingUp size={16} /> },
 ]
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>('lock')
+  const [tab, setTab] = useState<Tab>('prices')
+  const [network, setNetwork] = useState<Network>('testnet')
   const { isConnected } = useAccount()
 
   return (
     <div className="min-h-dvh flex flex-col" style={{ background: 'var(--bg-gradient)' }}>
-      {/* Header */}
-      <header className="flex items-center justify-between px-4 py-4 max-w-lg mx-auto w-full">
-        <div>
-          <h1 className="display text-xl font-bold" style={{ color: 'var(--ink)', letterSpacing: '-0.02em' }}>RateLock</h1>
-          <p className="text-xs mt-0.5" style={{ color: 'var(--subtle)' }}>FX rate protection · Arc Testnet</p>
+      <header className="flex items-center justify-between px-4 py-4 max-w-lg mx-auto w-full gap-3">
+        <div className="min-w-0">
+          <h1 className="display text-xl font-bold" style={{ color: 'var(--ink)', letterSpacing: '-0.02em' }}>PesaArc</h1>
+          <p className="text-xs mt-0.5" style={{ color: 'var(--subtle)' }}>Oracle aggregator · FX rate protection</p>
         </div>
-        <ConnectKitButton />
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <WsStatus apiBase={API_BASE} />
+          <NetworkToggle network={network} onChange={setNetwork} />
+          <ConnectKitButton />
+        </div>
       </header>
 
-      {/* Main card */}
       <main className="flex-1 flex flex-col items-center px-4 pb-8">
         <div className="w-full max-w-lg">
-          {isConnected && <WrongChainBanner />}
+          {isConnected && <WrongChainBanner network={network} />}
 
-          {/* Tabs */}
           <div className="flex gap-1 p-1 rounded-2xl mb-4" style={{ background: 'var(--surface-muted)' }}>
             {TABS.map(t => (
-              <button
-                key={t.id}
-                onClick={() => setTab(t.id)}
-                className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl text-sm font-semibold transition"
-                style={{
-                  background: tab === t.id ? 'var(--surface-strong)' : 'transparent',
-                  color: tab === t.id ? 'var(--ink)' : 'var(--subtle)',
-                  boxShadow: tab === t.id ? '0 1px 4px rgba(0,0,0,0.25)' : 'none',
-                }}
-              >
-                {t.icon}
-                {t.label}
+              <button key={t.id} onClick={() => setTab(t.id)}
+                className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-semibold transition"
+                style={{ background: tab === t.id ? 'var(--surface-strong)' : 'transparent', color: tab === t.id ? 'var(--ink)' : 'var(--subtle)', boxShadow: tab === t.id ? '0 1px 4px rgba(0,0,0,0.25)' : 'none' }}>
+                {t.icon}{t.label}
               </button>
             ))}
           </div>
 
-          {/* Panel */}
           <div className="rounded-2xl p-5" style={{ background: 'var(--surface-strong)', border: '1px solid var(--border)', backdropFilter: 'blur(12px)' }}>
-            {!isConnected ? (
+            {!isConnected && tab !== 'prices' ? (
               <div className="flex flex-col items-center justify-center py-10 gap-4">
                 <div className="w-14 h-14 rounded-2xl flex items-center justify-center" style={{ background: 'var(--surface-muted)' }}>
                   <Lock size={24} style={{ color: 'var(--accent)' }} />
                 </div>
                 <div className="text-center">
-                  <p className="display font-semibold text-lg" style={{ color: 'var(--ink)' }}>Connect to get started</p>
-                  <p className="text-sm mt-1" style={{ color: 'var(--subtle)' }}>Lock today's USD/NGN rate, guaranteed in USDC.</p>
+                  <p className="display font-semibold text-lg" style={{ color: 'var(--ink)' }}>Connect to transact</p>
+                  <p className="text-sm mt-1" style={{ color: 'var(--subtle)' }}>View live rates above without connecting.</p>
                 </div>
                 <ConnectKitButton label="Connect Wallet" />
               </div>
             ) : (
               <>
-                {tab === 'vault' && <VaultPanel />}
-                {tab === 'lock' && <LockPanel />}
-                {tab === 'settle' && <SettlePanel />}
+                {tab === 'prices' && <OracleDashboard network={network} />}
+                {tab === 'vault' && <VaultPanel network={network} />}
+                {tab === 'lock' && <LockPanel network={network} />}
+                {tab === 'settle' && <SettlePanel network={network} />}
               </>
             )}
           </div>
 
-          {/* Footer note */}
           <p className="text-center text-xs mt-4" style={{ color: 'var(--subtle)', opacity: 0.6 }}>
-            Contracts on Arc Testnet · demo with test USDC
+            Contracts on {CHAINS[network].label} · oracle.pesarc.xyz
           </p>
         </div>
       </main>
