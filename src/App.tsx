@@ -20,7 +20,7 @@ const CHAINS: Record<Network, { chain: Chain; chainId: number; usdc: `0x${string
   testnet: {
     chain: arcTestnet,
     chainId: arcTestnet.id,
-    usdc: '0x3600000000000000000000000000000000000000',
+    usdc: (import.meta.env.VITE_USDC_TESTNET as `0x${string}` | undefined) ?? '0x3600000000000000000000000000000000000001',
     label: 'Arc Testnet',
     explorer: 'https://explorer.testnet.arc.io',
   },
@@ -99,9 +99,87 @@ interface AggregatedPrice {
 }
 
 // ── API URL ───────────────────────────────────────────────────────────────────
-// In Docker the server runs on :3001; in static HF or local dev use relative path.
 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
 const API_BASE: string = (import.meta.env.VITE_API_BASE as string | undefined) ?? ''
+
+// ── Browser-side oracle aggregation (used when API_BASE is empty) ─────────────
+// Mirrors the server's free sources so prices display on the static Netlify deploy.
+type FxCacheEntry = { data: Record<string, number>; ts: number }
+let erCache: FxCacheEntry | null = null
+let fawazCache: FxCacheEntry | null = null
+const BROWSER_TTL = 300_000 // 5 min
+
+async function browserFetchErApi(): Promise<Record<string, number>> {
+  if (erCache && Date.now() - erCache.ts < BROWSER_TTL) return erCache.data
+  const r = await fetch('https://open.er-api.com/v6/latest/USD')
+  if (!r.ok) throw new Error(`ExchangeRate-API ${r.status}`)
+  const j = await r.json() as { rates: Record<string, number> }
+  erCache = { data: j.rates, ts: Date.now() }
+  return j.rates
+}
+
+async function browserFetchFawaz(): Promise<Record<string, number>> {
+  if (fawazCache && Date.now() - fawazCache.ts < BROWSER_TTL) return fawazCache.data
+  const r = await fetch('https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json')
+  if (!r.ok) throw new Error(`Fawaz ${r.status}`)
+  const j = await r.json() as { usd: Record<string, number> }
+  fawazCache = { data: j.usd, ts: Date.now() }
+  return j.usd
+}
+
+async function browserFetchDia(quoteCurrency: string): Promise<number | null> {
+  const supported = new Set(['NGN', 'EUR', 'GBP', 'BRL', 'JPY', 'CHF'])
+  if (!supported.has(quoteCurrency)) return null
+  const r = await fetch(`https://api.diadata.org/v1/rwa/Fiat/${quoteCurrency}-USD`)
+  if (!r.ok) return null
+  const j = await r.json() as { Price: number }
+  return j.Price > 0 ? 1 / j.Price : null
+}
+
+async function browserAggregatePair(pair: string, network: Network): Promise<AggregatedPrice> {
+  const nowSec = Math.floor(Date.now() / 1000)
+  const [, quote] = pair.split('/')
+  const isFx = ['NGN','KES','GHS','ZAR','EGP','TZS','UGX','XOF'].includes(quote ?? '')
+
+  const quotes: OracleQuote[] = []
+
+  if (isFx && quote) {
+    const q = quote.toLowerCase()
+    await Promise.allSettled([
+      browserFetchErApi().then(rates => {
+        const price = rates[quote]
+        if (price) quotes.push({ source: 'ExchangeRate-API', price, updatedAt: nowSec, staleSecs: 0 })
+      }),
+      browserFetchFawaz().then(rates => {
+        const price = rates[q]
+        if (price) quotes.push({ source: 'Fawaz Currency API', price, updatedAt: nowSec, staleSecs: 0 })
+      }),
+      browserFetchDia(quote).then(price => {
+        if (price) quotes.push({ source: 'DIA', price, updatedAt: nowSec, staleSecs: 0 })
+      }),
+    ])
+  } else {
+    // Crypto pairs: try CoinGecko public API (no key needed)
+    const cgId: Record<string, string> = { 'ETH/USD': 'ethereum', 'BTC/USD': 'bitcoin', 'LINK/USD': 'chainlink', 'USDC/USD': 'usd-coin' }
+    const id = cgId[pair]
+    if (id) {
+      try {
+        const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd`)
+        if (r.ok) {
+          const j = await r.json() as Record<string, { usd: number }>
+          const price = j[id]?.usd
+          if (price) quotes.push({ source: 'CoinGecko', price, updatedAt: nowSec, staleSecs: 0 })
+        }
+      } catch { /* silent */ }
+    }
+  }
+
+  if (quotes.length === 0) return { pair, network, bestPrice: 0, bestSource: 'none', quotes: [{ source: 'none', price: 0, updatedAt: 0, error: 'no sources available' }], fetchedAt: nowSec }
+
+  const sorted = [...quotes].filter(q => q.price > 0).sort((a, b) => a.price - b.price)
+  const mid = sorted[Math.floor(sorted.length / 2)] ?? sorted[0]
+  return { pair, network, bestPrice: mid?.price ?? 0, bestSource: mid?.source ?? 'none', quotes, fetchedAt: nowSec }
+}
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 type Tab = 'prices' | 'vault' | 'lock' | 'settle'
@@ -170,6 +248,7 @@ const SOURCE_COLORS: Record<string, string> = {
   'ExchangeRate-API':   '#8dd89f', // green
   'Fawaz Currency API': '#f0c040', // gold
   'CurrencyAPI Mirror': '#a0a0c0', // muted
+  'CoinGecko':          '#8df5c6', // coingecko mint
 }
 function sourceColor(s: string) { return SOURCE_COLORS[s] ?? 'var(--accent)' }
 
@@ -188,9 +267,16 @@ function PairRow({ pair, network, isSelected, onSelect }: { pair: string; networ
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const encoded = pair.replace('/', '-')
-      const res = await fetch(`${API_BASE}/price/${encoded}?network=${network}`)
-      if (res.ok) setData(await res.json() as AggregatedPrice)
+      if (API_BASE) {
+        // Server available — use REST API
+        const encoded = pair.replace('/', '-')
+        const res = await fetch(`${API_BASE}/price/${encoded}?network=${network}`)
+        if (res.ok) setData(await res.json() as AggregatedPrice)
+      } else {
+        // Static deploy — aggregate directly in the browser
+        const result = await browserAggregatePair(pair, network)
+        setData(result)
+      }
     } catch { /* silent */ }
     finally { setLoading(false) }
   }, [pair, network])

@@ -146,7 +146,8 @@ const __dirname = dirname(__filename)
 const distPath = join(__dirname, '..', 'dist')
 
 app.use(express.static(distPath))
-app.get('*', (_req, res) => {
+// Express 5 uses path-to-regexp v8 — bare '*' is no longer valid; use '/{*path}'
+app.get('/{*path}', (_req, res) => {
   res.sendFile(join(distPath, 'index.html'))
 })
 
