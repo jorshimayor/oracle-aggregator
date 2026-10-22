@@ -13,12 +13,21 @@
 
 import { createPublicClient, http as viemHttp, parseAbi } from 'viem'
 
-// ── RPC proxy helper ──────────────────────────────────────────────────────────
-function proxyRpcUrl(chain: string): string {
+// ── RPC URL resolver ──────────────────────────────────────────────────────────
+// On Render: set ARC_TESTNET_RPC / ARC_MAINNET_RPC to the direct Arc JSON-RPC
+// endpoints (no token required server-side — see render.yaml comments).
+// In the Arc Studio sandbox: RPC_PROXY_BASE_URL + RPC_PROXY_TOKEN are pre-set;
+// we fall back to them automatically so local dev works without extra config.
+function resolveRpcUrl(directEnvKey: string, proxyChain: string): string {
+  const direct = process.env[directEnvKey]
+  if (direct) return direct
   const base = process.env.RPC_PROXY_BASE_URL
   const token = process.env.RPC_PROXY_TOKEN
-  if (!base || !token) throw new Error('RPC_PROXY_BASE_URL / RPC_PROXY_TOKEN not set')
-  return `${base}/api/rpc/${chain}?_rpc_token=${token}`
+  if (!base || !token) throw new Error(
+    `${directEnvKey} is not set and RPC_PROXY_BASE_URL / RPC_PROXY_TOKEN are also missing. ` +
+    `On Render, set ${directEnvKey} (see render.yaml).`
+  )
+  return `${base}/api/rpc/${proxyChain}?_rpc_token=${token}`
 }
 
 // ── Network config (addresses from env, not hardcoded) ────────────────────────
@@ -29,7 +38,7 @@ function getNetworkConfig(network: Network) {
     return {
       id: 5042002,
       name: 'Arc Testnet',
-      rpcUrl: proxyRpcUrl('Arc_Testnet'),
+      rpcUrl: resolveRpcUrl('ARC_TESTNET_RPC', 'Arc_Testnet'),
       explorerUrl: 'https://explorer.testnet.arc.io',
       pushOracle: (process.env.VITE_TESTNET_PUSH_ORACLE ?? '') as `0x${string}`,
       pythCore: (process.env.VITE_PYTH_TESTNET ?? '') as `0x${string}`,
@@ -38,7 +47,7 @@ function getNetworkConfig(network: Network) {
   return {
     id: 5042,
     name: 'Arc',
-    rpcUrl: proxyRpcUrl('Arc'),
+    rpcUrl: resolveRpcUrl('ARC_MAINNET_RPC', 'Arc'),
     explorerUrl: 'https://explorer.arc.io',
     pushOracle: (process.env.VITE_MAINNET_PUSH_ORACLE ?? '') as `0x${string}`,
     pythCore: (process.env.VITE_PYTH_MAINNET ?? '') as `0x${string}`,

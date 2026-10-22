@@ -10,32 +10,42 @@ services:
         value: production
       - key: PORT
         value: 3001
-      # ── Copy these from your .env ─────────────────────────────────────────────
-      - key: RPC_PROXY_BASE_URL
-        sync: false
-      - key: RPC_PROXY_TOKEN
-        sync: false
-      - key: RPC_PROXY_CHAINS
-        sync: false
+
+      # ── Arc RPC endpoints (public, no token needed) ───────────────────────────
+      # These are the direct Arc Testnet and Mainnet JSON-RPC endpoints.
+      # No sign-up or token required — paste these exactly as shown.
+      - key: ARC_TESTNET_RPC
+        value: https://rpc.testnet.arc.io
+      - key: ARC_MAINNET_RPC
+        value: https://rpc.arc.io
+
+      # ── Ethereum RPC (free public endpoint for Chainlink on-chain reads) ──────
       - key: ETH_MAINNET_RPC
         value: https://ethereum.publicnode.com
+
+      # ── Pyth API key (OPTIONAL) ───────────────────────────────────────────────
+      # Get one free at https://www.pyth.network/api — enables Pyth crypto prices.
+      # Leave blank to skip Pyth; all other oracle sources work without it.
       - key: PYTH_API_KEY
         sync: false
-      # ── Arc Testnet contract addresses ────────────────────────────────────────
+
+      # ── Arc Testnet contract addresses (pre-filled) ───────────────────────────
       - key: VITE_TESTNET_VAULT
         value: "0x1b4e782b2d95bcaa14f4e8e9b59787878470b4a4"
       - key: VITE_TESTNET_PUSH_ORACLE
         value: "0xe3d81cadae52ba4c3a56b2cbd180bd33ec16d154"
       - key: VITE_TESTNET_RATELOCK
         value: "0x372d0965f14dcd66263ee10941af08473a7149c3"
-      # ── Arc Mainnet contract addresses (fill when deployed) ───────────────────
+
+      # ── Arc Mainnet contract addresses (fill after mainnet deploy) ────────────
       - key: VITE_MAINNET_VAULT
         sync: false
       - key: VITE_MAINNET_PUSH_ORACLE
         sync: false
       - key: VITE_MAINNET_RATELOCK
         sync: false
-      # ── Chainlink feed addresses on Ethereum mainnet ──────────────────────────
+
+      # ── Chainlink feed addresses on Ethereum mainnet (pre-filled) ────────────
       - key: VITE_CHAINLINK_ETH_USD
         value: "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"
       - key: VITE_CHAINLINK_BTC_USD
